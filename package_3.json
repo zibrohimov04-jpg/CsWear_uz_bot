@@ -1,0 +1,13 @@
+{
+  "name": "shop-bot-backend",
+  "version": "1.0.0",
+  "main": "bot.js",
+  "scripts": { "start": "node bot.js" },
+  "dependencies": {
+    "telegraf": "^4.16.3",
+    "express": "^4.18.2",
+    "multer": "^1.4.5-lts.1",
+    "cors": "^2.8.5",
+    "googleapis": "^140.0.0"
+  }
+}
