@@ -42,7 +42,20 @@ async function getSheetsClient() {
   if (sheetsClient) return sheetsClient;
   if (!process.env.GOOGLE_CREDENTIALS || !SHEET_ID) return null;
   try {
-    let rawCreds = process.env.GOOGLE_CREDENTIALS; rawCreds = rawCreds.replace(/\\\\\\\\n/g, "\\n"); const creds = JSON.parse(rawCreds);
+    // Parse credentials - handle Railway's various newline escaping styles
+    let raw = process.env.GOOGLE_CREDENTIALS;
+    let creds;
+    try {
+      creds = JSON.parse(raw);
+    } catch(e1) {
+      try {
+        creds = JSON.parse(raw.replace(/\\n/g, '\n'));
+      } catch(e2) {
+        creds = JSON.parse(raw.replace(/\\\\n/g, '\n'));
+      }
+    }
+    if (creds.private_key) creds.private_key = creds.private_key.replace(/\\n/g, '\n');
+
     const auth = new google.auth.GoogleAuth({ credentials: creds, scopes: ['https://www.googleapis.com/auth/spreadsheets'] });
     sheetsClient = google.sheets({ version: 'v4', auth });
     await ensureHeader();
