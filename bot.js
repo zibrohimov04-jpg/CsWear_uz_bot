@@ -33,10 +33,7 @@ function save() { try { fs.writeFileSync(ORDERS_FILE, JSON.stringify(orders, nul
 
 // ── GOOGLE SHEETS ──
 let sheetsClient = null;
-function tashkentTime(iso) {
-  if (!iso) return '';
-  return new Date(iso).toLocaleString('ru-RU', { timeZone: 'Asia/Tashkent', day: '2-digit', month: '2-digit', year: 'numeric', hour: '2-digit', minute: '2-digit' });
-}
+
 
 async function getSheetsClient() {
   if (sheetsClient) return sheetsClient;
@@ -61,47 +58,11 @@ async function getSheetsClient() {
   } catch (e) { console.error('Sheets init error:', e.message); return null; }
 }
 
-async function ensureHeader() {
-  try {
-    const res = await sheetsClient.spreadsheets.values.get({ spreadsheetId: SHEET_ID, range: `${SHEET_NAME}!A1` });
-    if (res.data.values?.[0]?.[0] === 'ID заказа') return;
-    await sheetsClient.spreadsheets.values.update({
-      spreadsheetId: SHEET_ID, range: `${SHEET_NAME}!A1`, valueInputOption: 'RAW',
-      resource: { values: [['ID заказа','Дата заказа','Имя','Телефон','Telegram','Товары','Сумма (сум)','Карта','Комментарий','Статус','Оплата подтверждена','Отправлен','В Ташкенте','Доставлен']] }
-    });
-  } catch (e) { console.error('Header error:', e.message); }
-}
 
-async function appendToSheet(order) {
-  const client = await getSheetsClient();
-  if (!client) return;
-  try {
-    const items = order.items.map(i => `${i.name} [${i.size}] ×${i.qty}`).join(', ');
-    await client.spreadsheets.values.append({
-      spreadsheetId: SHEET_ID, range: `${SHEET_NAME}!A:N`, valueInputOption: 'USER_ENTERED',
-      resource: { values: [[ order.id, tashkentTime(order.date), order.name, order.phone, order.tgUser||'', items, order.total, order.mapLink||'', order.note||'', 'Ожидает подтверждения', '','','','' ]] }
-    });
-  } catch (e) { console.error('Sheet append error:', e.message); }
-}
 
-async function updateSheetStatus(orderId, statusLabel, colIndex) {
-  const client = await getSheetsClient();
-  if (!client || !colIndex) return;
-  try {
-    const res = await client.spreadsheets.values.get({ spreadsheetId: SHEET_ID, range: `${SHEET_NAME}!A:A` });
-    const rowNum = (res.data.values || []).findIndex(r => r[0] === orderId) + 1;
-    if (!rowNum) return;
-    const col = String.fromCharCode(64 + colIndex);
-    const now = tashkentTime(new Date().toISOString());
-    await client.spreadsheets.values.batchUpdate({
-      spreadsheetId: SHEET_ID,
-      resource: { valueInputOption: 'USER_ENTERED', data: [
-        { range: `${SHEET_NAME}!J${rowNum}`, values: [[statusLabel]] },
-        { range: `${SHEET_NAME}!${col}${rowNum}`, values: [[now]] }
-      ]}
-    });
-  } catch (e) { console.error('Sheet update error:', e.message); }
-}
+
+
+
 
 // ── BUILD STATUS KEYBOARD ──
 function buildKeyboard(order) {
@@ -141,7 +102,13 @@ bot.on('callback_query', async (ctx) => {
   order.timeline.push({ status: newStatus, label: STATUS_CONFIG[newStatus].label, time: now });
   save();
 
-  await updateSheetStatus(orderId, STATUS_CONFIG[newStatus].label, STATUS_CONFIG[newStatus].sheetCol);
+  await postToSheet({
+    type: 'status_update',
+    id: orderId,
+    status: newStatus,
+    statusLabel: STATUS_CONFIG[newStatus].label,
+    time: new Date().toLocaleString('ru-RU', {timeZone:'Asia/Tashkent'})
+  });
 
   try { await ctx.editMessageReplyMarkup(buildKeyboard(order)); } catch (e) {}
   await ctx.answerCbQuery(`${STATUS_CONFIG[newStatus].emoji} ${STATUS_CONFIG[newStatus].label}`);
@@ -162,7 +129,18 @@ app.post('/order', upload.single('screenshot'), async (req, res) => {
     orders[order.id] = order;
     save();
 
-    await appendToSheet(order);
+    await postToSheet({
+      type: 'new_order',
+      id: order.id,
+      date: new Date(order.date).toLocaleString('ru-RU', {timeZone:'Asia/Tashkent'}),
+      name: order.name,
+      phone: order.phone,
+      tgUser: order.tgUser||'',
+      items: order.items,
+      total: order.total,
+      mapLink: order.mapLink||'',
+      note: order.note||''
+    });
 
     const items = order.items.map(i => `• ${i.name} [${i.size}] × ${i.qty} — ${Number(i.sum).toLocaleString('ru-RU')} сум`).join('\n');
     const loc = order.mapLink ? `📍 <a href="${order.mapLink}">Открыть на карте</a>` : '📍 —';
