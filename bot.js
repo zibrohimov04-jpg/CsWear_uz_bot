@@ -40,21 +40,19 @@ function tashkentTime(iso) {
 
 async function getSheetsClient() {
   if (sheetsClient) return sheetsClient;
-  if (!process.env.GOOGLE_CREDENTIALS || !SHEET_ID) return null;
+  if (!process.env.GOOGLE_CLIENT_EMAIL || !process.env.GOOGLE_PRIVATE_KEY || !SHEET_ID) return null;
   try {
-    // Parse credentials - handle Railway's various newline escaping styles
-    let raw = process.env.GOOGLE_CREDENTIALS;
-    let creds;
-    try {
-      creds = JSON.parse(raw);
-    } catch(e1) {
-      try {
-        creds = JSON.parse(raw.replace(/\\n/g, '\n'));
-      } catch(e2) {
-        creds = JSON.parse(raw.replace(/\\\\n/g, '\n'));
-      }
-    }
-    if (creds.private_key) creds.private_key = creds.private_key.replace(/\\n/g, '\n');
+    // Use separate env vars to avoid Railway JSON encoding issues
+    let privateKey = process.env.GOOGLE_PRIVATE_KEY;
+    // Normalize newlines
+    privateKey = privateKey.replace(/\\n/g, '\n');
+    const creds = {
+      type: 'service_account',
+      client_email: process.env.GOOGLE_CLIENT_EMAIL,
+      private_key: privateKey,
+      private_key_id: process.env.GOOGLE_PRIVATE_KEY_ID || '',
+      token_uri: 'https://oauth2.googleapis.com/token'
+    };
 
     const auth = new google.auth.GoogleAuth({ credentials: creds, scopes: ['https://www.googleapis.com/auth/spreadsheets'] });
     sheetsClient = google.sheets({ version: 'v4', auth });
