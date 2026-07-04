@@ -14,25 +14,37 @@ if (!BOT_TOKEN || !SHOP_URL || !OWNER_CHAT_ID) { console.error('Missing env vars
 
 // ── STATUS CONFIG ──
 const STATUS_CONFIG = {
-  pending:     { label: 'Заказ получен',        emoji: '📋' },
-  confirmed:   { label: 'Оплата подтверждена',  emoji: '✅' },
-  shipped:     { label: 'Отправлен',            emoji: '📦' },
-  in_tashkent: { label: 'В Ташкенте',           emoji: '🏙' },
-  delivered:   { label: 'Доставлен',            emoji: '🎉' }
+  pending:     { label: 'Заказ получен',       emoji: '📋' },
+  confirmed:   { label: 'Оплата подтверждена', emoji: '✅' },
+  shipped:     { label: 'Отправлен',           emoji: '📦' },
+  in_tashkent: { label: 'В Ташкенте',          emoji: '🏙' },
+  delivered:   { label: 'Доставлен',           emoji: '🎉' }
 };
 const STATUS_FLOW = ['pending', 'confirmed', 'shipped', 'in_tashkent', 'delivered'];
 
-// ── ORDER STORE ──
-const ORDERS_FILE = './orders.json';
-let orders = {};
-try { if (fs.existsSync(ORDERS_FILE)) orders = JSON.parse(fs.readFileSync(ORDERS_FILE, 'utf8')); }
-catch (e) { console.log('Fresh order store'); }
+// ── PROMO CODES ──
+// Format: { "CODE": { discount: 10, type: "percent" } }
+const PROMO_CODES = {
+  "CSWEAR10": { discount: 10, type: "percent" },
+  "FIRST15":  { discount: 15, type: "percent" },
+  "VIP20":    { discount: 20, type: "percent" }
+};
+
+// ── DATA STORE ──
+const DB_FILE = './db.json';
+let db = { orders: {}, customers: {} };
+try {
+  if (fs.existsSync(DB_FILE)) db = JSON.parse(fs.readFileSync(DB_FILE, 'utf8'));
+  if (!db.orders) db.orders = {};
+  if (!db.customers) db.customers = {};
+} catch (e) { console.log('Fresh db'); }
+
 function save() {
-  try { fs.writeFileSync(ORDERS_FILE, JSON.stringify(orders, null, 2)); }
+  try { fs.writeFileSync(DB_FILE, JSON.stringify(db, null, 2)); }
   catch (e) { console.error('Save error', e); }
 }
 
-// ── GOOGLE SHEETS via Apps Script ──
+// ── SHEETS ──
 async function postToSheet(data) {
   if (!SHEETS_URL) return;
   try {
@@ -45,7 +57,7 @@ async function postToSheet(data) {
     const json = await res.json();
     if (!json.ok) console.error('Sheet error:', json.error);
     else console.log('Sheet updated OK');
-  } catch (e) { console.error('Sheet fetch error:', e.message); }
+  } catch (e) { console.error('Sheet error:', e.message); }
 }
 
 function tashkentTime(iso) {
@@ -64,6 +76,14 @@ function buildKeyboard(order) {
 const bot = new Telegraf(BOT_TOKEN);
 
 bot.start((ctx) => {
+  const userId = String(ctx.from.id);
+  // Save customer info on /start
+  if (!db.customers[userId]) db.customers[userId] = {};
+  db.customers[userId].chatId = ctx.chat.id;
+  db.customers[userId].username = ctx.from.username || null;
+  db.customers[userId].firstName = ctx.from.first_name || null;
+  save();
+
   ctx.reply('Добро пожаловать в CSWEAR UZ! 👋\nНажмите кнопку ниже, чтобы открыть магазин.', {
     reply_markup: {
       keyboard: [[{ text: '🛍 Открыть магазин', web_app: { url: SHOP_URL } }]],
@@ -72,15 +92,70 @@ bot.start((ctx) => {
   });
 });
 
+// ── VALIDATE PROMO ──
+bot.command('promo', (ctx) => {
+  const code = ctx.message.text.split(' ')[1]?.toUpperCase();
+  if (!code) { ctx.reply('Используйте: /promo КОД'); return; }
+  const promo = PROMO_CODES[code];
+  if (promo) ctx.reply(`✅ Промокод действителен! Скидка ${promo.discount}%`);
+  else ctx.reply('❌ Промокод недействителен');
+});
+
+// ── BROADCAST ──
+bot.command('broadcast', async (ctx) => {
+  if (String(ctx.from.id) !== String(OWNER_CHAT_ID)) return;
+  const text = ctx.message.text.replace('/broadcast', '').trim();
+  if (!text) { ctx.reply('Используйте: /broadcast ваше сообщение'); return; }
+
+  const customers = Object.values(db.customers).filter(c => c.chatId);
+  let sent = 0, failed = 0;
+  for (const customer of customers) {
+    try {
+      await bot.telegram.sendMessage(customer.chatId,
+        `📢 *Сообщение от CSWEAR UZ*\n\n${text}`,
+        { parse_mode: 'Markdown' }
+      );
+      sent++;
+    } catch (e) { failed++; }
+  }
+  ctx.reply(`✅ Отправлено: ${sent}\n❌ Ошибок: ${failed}`);
+});
+
+// ── CALLBACK QUERIES ──
 bot.on('callback_query', async (ctx) => {
   const data = ctx.callbackQuery.data;
   if (data === 'done') { await ctx.answerCbQuery(); return; }
+
+  // Review rating
+  if (data.startsWith('review:')) {
+    const [, orderId, rating] = data.split(':');
+    const order = db.orders[orderId];
+    if (!order) { await ctx.answerCbQuery(); return; }
+
+    order.review = { rating: Number(rating), time: new Date().toISOString() };
+    save();
+
+    await ctx.editMessageText(
+      `Спасибо за оценку! Вы поставили ${'⭐'.repeat(Number(rating))}\n\nЕсли хотите оставить комментарий, просто напишите его в чат.`,
+    );
+    order.awaitingReviewComment = true;
+    save();
+
+    const stars = '⭐'.repeat(Number(rating)) + '☆'.repeat(5 - Number(rating));
+    await bot.telegram.sendMessage(OWNER_CHAT_ID,
+      `⭐ *Новый отзыв на заказ ${orderId}*\n\nОценка: ${stars}\nКлиент: ${order.customerName || '—'}`,
+      { parse_mode: 'Markdown' }
+    );
+    await ctx.answerCbQuery('Спасибо! 🙏');
+    return;
+  }
+
   if (!data.startsWith('st:')) return;
 
   const parts = data.split(':');
   const newStatus = parts[1];
   const orderId = parts[2];
-  const order = orders[orderId];
+  const order = db.orders[orderId];
 
   if (!order) { await ctx.answerCbQuery('Заказ не найден'); return; }
   const currentIdx = STATUS_FLOW.indexOf(order.status);
@@ -94,15 +169,57 @@ bot.on('callback_query', async (ctx) => {
   save();
 
   await postToSheet({
-    type: 'status_update',
-    id: orderId,
-    status: newStatus,
-    statusLabel: STATUS_CONFIG[newStatus].label,
-    time: tashkentTime(now)
+    type: 'status_update', id: orderId, status: newStatus,
+    statusLabel: STATUS_CONFIG[newStatus].label, time: tashkentTime(now)
   });
+
+  // Notify customer if delivered — ask for review
+  if (newStatus === 'delivered' && order.userId) {
+    const customer = db.customers[order.userId];
+    if (customer?.chatId) {
+      try {
+        await bot.telegram.sendMessage(
+          customer.chatId,
+          `🎉 Ваш заказ *${orderId}* доставлен!\n\nПожалуйста, оцените ваш опыт покупки:`,
+          {
+            parse_mode: 'Markdown',
+            reply_markup: {
+              inline_keyboard: [[
+                { text: '⭐', callback_data: `review:${orderId}:1` },
+                { text: '⭐⭐', callback_data: `review:${orderId}:2` },
+                { text: '⭐⭐⭐', callback_data: `review:${orderId}:3` },
+                { text: '⭐⭐⭐⭐', callback_data: `review:${orderId}:4` },
+                { text: '⭐⭐⭐⭐⭐', callback_data: `review:${orderId}:5` }
+              ]]
+            }
+          }
+        );
+      } catch (e) { console.error('Review message error:', e.message); }
+    }
+  }
 
   try { await ctx.editMessageReplyMarkup(buildKeyboard(order)); } catch (e) {}
   await ctx.answerCbQuery(`${STATUS_CONFIG[newStatus].emoji} ${STATUS_CONFIG[newStatus].label}`);
+});
+
+// Handle review text comments
+bot.on('message', async (ctx) => {
+  if (ctx.message.web_app_data) return; // handled elsewhere
+  const userId = String(ctx.from.id);
+  // Check if any order is awaiting a review comment from this user
+  const pendingReview = Object.values(db.orders).find(
+    o => o.userId === userId && o.awaitingReviewComment && o.review && !o.review.comment
+  );
+  if (pendingReview && ctx.message.text) {
+    pendingReview.review.comment = ctx.message.text;
+    pendingReview.awaitingReviewComment = false;
+    save();
+    await ctx.reply('Спасибо за ваш отзыв! 🙏');
+    await bot.telegram.sendMessage(OWNER_CHAT_ID,
+      `💬 *Комментарий к отзыву ${pendingReview.id}*\n\n"${ctx.message.text}"`,
+      { parse_mode: 'Markdown' }
+    );
+  }
 });
 
 // ── EXPRESS ──
@@ -111,37 +228,52 @@ const upload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 15 
 app.use(cors());
 app.use(express.json());
 
+// Validate promo code
+app.post('/promo', (req, res) => {
+  const { code } = req.body;
+  if (!code) return res.json({ ok: false, error: 'No code' });
+  const promo = PROMO_CODES[code.toUpperCase().trim()];
+  if (promo) res.json({ ok: true, discount: promo.discount, type: promo.type });
+  else res.json({ ok: false, error: 'Промокод недействителен' });
+});
+
+// Submit order
 app.post('/order', upload.single('screenshot'), async (req, res) => {
   try {
     const order = JSON.parse(req.body.orderData);
     order.status = 'pending';
     order.date = new Date().toISOString();
     order.timeline = [{ status: 'pending', label: 'Заказ получен', time: order.date }];
-    orders[order.id] = order;
+
+    // Get Telegram username from customer store
+    const customer = db.customers[order.userId];
+    const tgUsername = order.tgUser || (customer?.username ? '@' + customer.username : null) || (customer?.firstName || null) || '—';
+    order.customerName = tgUsername;
+
+    // Store customer's chat ID for later notifications
+    if (customer) {
+      db.customers[order.userId].lastOrderId = order.id;
+    }
+
+    db.orders[order.id] = order;
     save();
 
-    // Send to Google Sheets
     await postToSheet({
-      type: 'new_order',
-      id: order.id,
-      date: tashkentTime(order.date),
-      name: order.name,
-      phone: order.phone,
-      tgUser: order.tgUser || '',
-      items: order.items,
-      total: order.total,
-      mapLink: order.mapLink || '',
-      note: order.note || ''
+      type: 'new_order', id: order.id, date: tashkentTime(order.date),
+      name: order.name, phone: order.phone, tgUser: tgUsername,
+      items: order.items, total: order.total,
+      mapLink: order.mapLink || '', note: order.note || ''
     });
 
     const items = order.items.map(i => `• ${i.name} [${i.size}] × ${i.qty} — ${Number(i.sum).toLocaleString('ru-RU')} сум`).join('\n');
     const loc = order.mapLink ? `📍 <a href="${order.mapLink}">Открыть на карте</a>` : '📍 —';
+    const promoLine = order.promoCode ? `🏷 Промокод: ${order.promoCode} (-${order.discount}%)\n` : '';
 
     const msg =
       `🆕 <b>НОВЫЙ ЗАКАЗ ${order.id}</b>\n\n` +
-      `👤 <b>${order.name}</b>\n📞 ${order.phone}\n💬 ${order.tgUser || '—'}\n📝 ${order.note || '—'}\n\n` +
+      `👤 <b>${order.name}</b>\n📞 ${order.phone}\n💬 ${tgUsername}\n📝 ${order.note || '—'}\n\n` +
       `🧾 <b>Товары:</b>\n${items}\n\n` +
-      `💰 <b>ИТОГО: ${Number(order.total).toLocaleString('ru-RU')} сум</b>\n${loc}\n\n` +
+      `${promoLine}💰 <b>ИТОГО: ${Number(order.total).toLocaleString('ru-RU')} сум</b>\n${loc}\n\n` +
       `📦 Доставка: 7–14 дней в Ташкент`;
 
     const kb = { inline_keyboard: [[{ text: '✅ Подтвердить оплату', callback_data: `st:confirmed:${order.id}` }]] };
@@ -153,7 +285,7 @@ app.post('/order', upload.single('screenshot'), async (req, res) => {
       sent = await bot.telegram.sendMessage(OWNER_CHAT_ID, msg, { parse_mode: 'HTML', reply_markup: kb });
     }
 
-    orders[order.id].messageId = sent.message_id;
+    db.orders[order.id].messageId = sent.message_id;
     save();
     res.json({ ok: true, orderId: order.id });
   } catch (e) {
@@ -162,8 +294,9 @@ app.post('/order', upload.single('screenshot'), async (req, res) => {
   }
 });
 
+// Get orders for a user — from persistent store
 app.get('/orders/:userId', (req, res) => {
-  const userOrders = Object.values(orders)
+  const userOrders = Object.values(db.orders)
     .filter(o => String(o.userId) === String(req.params.userId))
     .sort((a, b) => new Date(b.date) - new Date(a.date));
   res.json(userOrders);
