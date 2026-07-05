@@ -22,9 +22,9 @@ const STATUS_CONFIG = {
 const STATUS_FLOW = ['pending', 'confirmed', 'shipped', 'in_tashkent', 'delivered'];
 
 const PROMO_CODES = {
-  "CSWEAR10": { discount: 10, type: "percent" },
-  "FIRST15":  { discount: 15, type: "percent" },
-  "VIP20":    { discount: 20, type: "percent" }
+  "CSWEAR10": { discount: 10, type: "10" },
+  "FIRST15":  { discount: 15, type: "15" },
+  "VIP20":    { discount: 20, type: "20" }
 };
 
 // ── DB ──
@@ -159,11 +159,11 @@ bot.on('callback_query', async (ctx) => {
             parse_mode: 'Markdown',
             reply_markup: {
               inline_keyboard: [[
-                { text: '⭐', callback_data: `review:${orderId}:1` },
-                { text: '⭐⭐', callback_data: `review:${orderId}:2` },
-                { text: '⭐⭐⭐', callback_data: `review:${orderId}:3` },
-                { text: '⭐⭐⭐⭐', callback_data: `review:${orderId}:4` },
-                { text: '⭐⭐⭐⭐⭐', callback_data: `review:${orderId}:5` }
+                { text: '1⭐', callback_data: `review:${orderId}:1` },
+                { text: '2⭐', callback_data: `review:${orderId}:2` },
+                { text: '3⭐', callback_data: `review:${orderId}:3` },
+                { text: '4⭐', callback_data: `review:${orderId}:4` },
+                { text: '5⭐', callback_data: `review:${orderId}:5` }
               ]]
             }
           }
