@@ -12,7 +12,6 @@ const PORT = process.env.PORT || 3000;
 
 if (!BOT_TOKEN || !SHOP_URL || !OWNER_CHAT_ID) { console.error('Missing env vars'); process.exit(1); }
 
-// ── STATUS CONFIG ──
 const STATUS_CONFIG = {
   pending:     { label: 'Заказ получен',       emoji: '📋' },
   confirmed:   { label: 'Оплата подтверждена', emoji: '✅' },
@@ -22,21 +21,22 @@ const STATUS_CONFIG = {
 };
 const STATUS_FLOW = ['pending', 'confirmed', 'shipped', 'in_tashkent', 'delivered'];
 
-// ── PROMO CODES ──
-// Format: { "CODE": { discount: 10, type: "percent" } }
 const PROMO_CODES = {
   "CSWEAR10": { discount: 10, type: "percent" },
   "FIRST15":  { discount: 15, type: "percent" },
   "VIP20":    { discount: 20, type: "percent" }
 };
 
-// ── DATA STORE ──
+// ── DB ──
 const DB_FILE = './db.json';
 let db = { orders: {}, customers: {} };
 try {
-  if (fs.existsSync(DB_FILE)) db = JSON.parse(fs.readFileSync(DB_FILE, 'utf8'));
-  if (!db.orders) db.orders = {};
-  if (!db.customers) db.customers = {};
+  if (fs.existsSync(DB_FILE)) {
+    const raw = fs.readFileSync(DB_FILE, 'utf8');
+    db = JSON.parse(raw);
+    if (!db.orders) db.orders = {};
+    if (!db.customers) db.customers = {};
+  }
 } catch (e) { console.log('Fresh db'); }
 
 function save() {
@@ -44,7 +44,6 @@ function save() {
   catch (e) { console.error('Save error', e); }
 }
 
-// ── SHEETS ──
 async function postToSheet(data) {
   if (!SHEETS_URL) return;
   try {
@@ -64,7 +63,6 @@ function tashkentTime(iso) {
   return new Date(iso || Date.now()).toLocaleString('ru-RU', { timeZone: 'Asia/Tashkent' });
 }
 
-// ── STATUS KEYBOARD ──
 function buildKeyboard(order) {
   const idx = STATUS_FLOW.indexOf(order.status);
   const next = STATUS_FLOW.slice(idx + 1);
@@ -72,12 +70,10 @@ function buildKeyboard(order) {
   return { inline_keyboard: [next.map(s => ({ text: `${STATUS_CONFIG[s].emoji} ${STATUS_CONFIG[s].label}`, callback_data: `st:${s}:${order.id}` }))] };
 }
 
-// ── BOT ──
 const bot = new Telegraf(BOT_TOKEN);
 
 bot.start((ctx) => {
   const userId = String(ctx.from.id);
-  // Save customer info on /start
   if (!db.customers[userId]) db.customers[userId] = {};
   db.customers[userId].chatId = ctx.chat.id;
   db.customers[userId].username = ctx.from.username || null;
@@ -92,58 +88,40 @@ bot.start((ctx) => {
   });
 });
 
-// ── VALIDATE PROMO ──
-bot.command('promo', (ctx) => {
-  const code = ctx.message.text.split(' ')[1]?.toUpperCase();
-  if (!code) { ctx.reply('Используйте: /promo КОД'); return; }
-  const promo = PROMO_CODES[code];
-  if (promo) ctx.reply(`✅ Промокод действителен! Скидка ${promo.discount}%`);
-  else ctx.reply('❌ Промокод недействителен');
-});
-
-// ── BROADCAST ──
 bot.command('broadcast', async (ctx) => {
   if (String(ctx.from.id) !== String(OWNER_CHAT_ID)) return;
   const text = ctx.message.text.replace('/broadcast', '').trim();
   if (!text) { ctx.reply('Используйте: /broadcast ваше сообщение'); return; }
-
   const customers = Object.values(db.customers).filter(c => c.chatId);
   let sent = 0, failed = 0;
   for (const customer of customers) {
     try {
-      await bot.telegram.sendMessage(customer.chatId,
-        `📢 *Сообщение от CSWEAR UZ*\n\n${text}`,
-        { parse_mode: 'Markdown' }
-      );
+      await bot.telegram.sendMessage(customer.chatId, `📢 *Сообщение от CSWEAR UZ*\n\n${text}`, { parse_mode: 'Markdown' });
       sent++;
     } catch (e) { failed++; }
   }
   ctx.reply(`✅ Отправлено: ${sent}\n❌ Ошибок: ${failed}`);
 });
 
-// ── CALLBACK QUERIES ──
 bot.on('callback_query', async (ctx) => {
   const data = ctx.callbackQuery.data;
   if (data === 'done') { await ctx.answerCbQuery(); return; }
 
-  // Review rating
   if (data.startsWith('review:')) {
-    const [, orderId, rating] = data.split(':');
+    const parts = data.split(':');
+    const orderId = parts[1];
+    const rating = Number(parts[2]);
     const order = db.orders[orderId];
     if (!order) { await ctx.answerCbQuery(); return; }
-
-    order.review = { rating: Number(rating), time: new Date().toISOString() };
-    save();
-
-    await ctx.editMessageText(
-      `Спасибо за оценку! Вы поставили ${'⭐'.repeat(Number(rating))}\n\nЕсли хотите оставить комментарий, просто напишите его в чат.`,
-    );
+    order.review = { rating, time: new Date().toISOString() };
     order.awaitingReviewComment = true;
     save();
-
-    const stars = '⭐'.repeat(Number(rating)) + '☆'.repeat(5 - Number(rating));
+    const stars = '⭐'.repeat(rating) + '☆'.repeat(5 - rating);
+    await ctx.editMessageText(
+      `Спасибо за оценку! ${stars}\n\nЕсли хотите оставить комментарий — просто напишите его в чат.`
+    );
     await bot.telegram.sendMessage(OWNER_CHAT_ID,
-      `⭐ *Новый отзыв на заказ ${orderId}*\n\nОценка: ${stars}\nКлиент: ${order.customerName || '—'}`,
+      `⭐ *Новый отзыв — заказ ${orderId}*\nОценка: ${stars}\nКлиент: ${order.customerName || '—'}`,
       { parse_mode: 'Markdown' }
     );
     await ctx.answerCbQuery('Спасибо! 🙏');
@@ -151,12 +129,10 @@ bot.on('callback_query', async (ctx) => {
   }
 
   if (!data.startsWith('st:')) return;
-
   const parts = data.split(':');
   const newStatus = parts[1];
   const orderId = parts[2];
   const order = db.orders[orderId];
-
   if (!order) { await ctx.answerCbQuery('Заказ не найден'); return; }
   const currentIdx = STATUS_FLOW.indexOf(order.status);
   const newIdx = STATUS_FLOW.indexOf(newStatus);
@@ -173,14 +149,12 @@ bot.on('callback_query', async (ctx) => {
     statusLabel: STATUS_CONFIG[newStatus].label, time: tashkentTime(now)
   });
 
-  // Notify customer if delivered — ask for review
   if (newStatus === 'delivered' && order.userId) {
     const customer = db.customers[order.userId];
     if (customer?.chatId) {
       try {
-        await bot.telegram.sendMessage(
-          customer.chatId,
-          `🎉 Ваш заказ *${orderId}* доставлен!\n\nПожалуйста, оцените ваш опыт покупки:`,
+        await bot.telegram.sendMessage(customer.chatId,
+          `🎉 Ваш заказ *${orderId}* доставлен! Спасибо за покупку в CSWEAR UZ!\n\nПожалуйста, оцените ваш опыт:`,
           {
             parse_mode: 'Markdown',
             reply_markup: {
@@ -194,7 +168,7 @@ bot.on('callback_query', async (ctx) => {
             }
           }
         );
-      } catch (e) { console.error('Review message error:', e.message); }
+      } catch (e) { console.error('Review msg error:', e.message); }
     }
   }
 
@@ -202,11 +176,15 @@ bot.on('callback_query', async (ctx) => {
   await ctx.answerCbQuery(`${STATUS_CONFIG[newStatus].emoji} ${STATUS_CONFIG[newStatus].label}`);
 });
 
-// Handle review text comments
 bot.on('message', async (ctx) => {
-  if (ctx.message.web_app_data) return; // handled elsewhere
+  if (ctx.message.web_app_data) return;
   const userId = String(ctx.from.id);
-  // Check if any order is awaiting a review comment from this user
+  // Save customer on any message
+  if (!db.customers[userId]) db.customers[userId] = {};
+  db.customers[userId].chatId = ctx.chat.id;
+  db.customers[userId].username = ctx.from.username || null;
+  save();
+
   const pendingReview = Object.values(db.orders).find(
     o => o.userId === userId && o.awaitingReviewComment && o.review && !o.review.comment
   );
@@ -222,22 +200,18 @@ bot.on('message', async (ctx) => {
   }
 });
 
-// ── EXPRESS ──
 const app = express();
 const upload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 15 * 1024 * 1024 } });
 app.use(cors());
 app.use(express.json());
 
-// Validate promo code
 app.post('/promo', (req, res) => {
-  const { code } = req.body;
-  if (!code) return res.json({ ok: false, error: 'No code' });
-  const promo = PROMO_CODES[code.toUpperCase().trim()];
+  const code = (req.body.code || '').toUpperCase().trim();
+  const promo = PROMO_CODES[code];
   if (promo) res.json({ ok: true, discount: promo.discount, type: promo.type });
   else res.json({ ok: false, error: 'Промокод недействителен' });
 });
 
-// Submit order
 app.post('/order', upload.single('screenshot'), async (req, res) => {
   try {
     const order = JSON.parse(req.body.orderData);
@@ -245,12 +219,12 @@ app.post('/order', upload.single('screenshot'), async (req, res) => {
     order.date = new Date().toISOString();
     order.timeline = [{ status: 'pending', label: 'Заказ получен', time: order.date }];
 
-    // Get Telegram username from customer store
     const customer = db.customers[order.userId];
-    const tgUsername = order.tgUser || (customer?.username ? '@' + customer.username : null) || (customer?.firstName || null) || '—';
+    const tgUsername = order.tgUser ||
+      (customer?.username ? '@' + customer.username : null) ||
+      customer?.firstName || '—';
     order.customerName = tgUsername;
 
-    // Store customer's chat ID for later notifications
     if (customer) {
       db.customers[order.userId].lastOrderId = order.id;
     }
@@ -265,7 +239,9 @@ app.post('/order', upload.single('screenshot'), async (req, res) => {
       mapLink: order.mapLink || '', note: order.note || ''
     });
 
-    const items = order.items.map(i => `• ${i.name} [${i.size}] × ${i.qty} — ${Number(i.sum).toLocaleString('ru-RU')} сум`).join('\n');
+    const items = order.items.map(i =>
+      `• ${i.name} [${i.size}] × ${i.qty} — ${Number(i.sum).toLocaleString('ru-RU')} сум`
+    ).join('\n');
     const loc = order.mapLink ? `📍 <a href="${order.mapLink}">Открыть на карте</a>` : '📍 —';
     const promoLine = order.promoCode ? `🏷 Промокод: ${order.promoCode} (-${order.discount}%)\n` : '';
 
@@ -294,7 +270,6 @@ app.post('/order', upload.single('screenshot'), async (req, res) => {
   }
 });
 
-// Get orders for a user — from persistent store
 app.get('/orders/:userId', (req, res) => {
   const userOrders = Object.values(db.orders)
     .filter(o => String(o.userId) === String(req.params.userId))
