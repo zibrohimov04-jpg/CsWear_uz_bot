@@ -14,6 +14,7 @@ if (!BOT_TOKEN || !SHOP_URL || !OWNER_CHAT_ID) { console.error('Missing env vars
 
 const STATUS_CONFIG = {
   pending:     { label: 'Заказ получен',       emoji: '📋' },
+  rejected:    { label: 'Оплата отклонена',    emoji: '❌' },
   confirmed:   { label: 'Оплата подтверждена', emoji: '✅' },
   shipped:     { label: 'Отправлен',           emoji: '📦' },
   in_tashkent: { label: 'В Ташкенте',          emoji: '🏙' },
@@ -111,19 +112,40 @@ bot.on('callback_query', async (ctx) => {
     if (!order) { await ctx.answerCbQuery('Заказ не найден'); return; }
     if (order.status !== 'pending') { await ctx.answerCbQuery('Заказ уже обработан'); return; }
 
+    // Update order status to rejected
+    order.status = 'rejected';
+    if (!order.timeline) order.timeline = [];
+    order.timeline.push({ status: 'rejected', label: 'Оплата отклонена', time: new Date().toISOString() });
+    save();
+
+    // Update sheets
+    await postToSheet({
+      type: 'status_update', id: orderId, status: 'rejected',
+      statusLabel: 'Оплата отклонена', time: tashkentTime(new Date().toISOString())
+    });
+
     // Notify customer
     const customer = db.customers[order.userId];
     if (customer?.chatId) {
       try {
         await bot.telegram.sendMessage(
           customer.chatId,
-          `❌ *Оплата по заказу ${orderId} не принята*\n\nСкриншот не является подтверждением оплаты.\n\nПожалуйста, откройте магазин, перейдите к оплате и прикрепите правильный скриншот чека из приложения Click или Payme.`,
+          `❌ *Оплата по заказу ${orderId} не принята*
+
+Прикреплённый скриншот не является подтверждением оплаты из Click или Payme.
+
+*Что делать:*
+1. Оплатите заказ через Click или Payme
+2. Сделайте скриншот подтверждения оплаты прямо в приложении
+3. Откройте магазин заново и оформите новый заказ с правильным скриншотом
+
+Если у вас есть вопросы — напишите нам напрямую.`,
           { parse_mode: 'Markdown' }
         );
       } catch (e) { console.error('Reject notify error:', e.message); }
     }
 
-    // Edit message to show rejected
+    // Edit Telegram message
     try {
       await ctx.editMessageReplyMarkup({
         inline_keyboard: [[{ text: '❌ Оплата отклонена', callback_data: 'done' }]]
