@@ -105,6 +105,35 @@ bot.on('callback_query', async (ctx) => {
   const data = ctx.callbackQuery.data;
   if (data === 'done') { await ctx.answerCbQuery(); return; }
 
+  if (data.startsWith('reject:')) {
+    const orderId = data.replace('reject:', '');
+    const order = db.orders[orderId];
+    if (!order) { await ctx.answerCbQuery('Заказ не найден'); return; }
+    if (order.status !== 'pending') { await ctx.answerCbQuery('Заказ уже обработан'); return; }
+
+    // Notify customer
+    const customer = db.customers[order.userId];
+    if (customer?.chatId) {
+      try {
+        await bot.telegram.sendMessage(
+          customer.chatId,
+          `❌ *Оплата по заказу ${orderId} не принята*\n\nСкриншот не является подтверждением оплаты.\n\nПожалуйста, откройте магазин, перейдите к оплате и прикрепите правильный скриншот чека из приложения Click или Payme.`,
+          { parse_mode: 'Markdown' }
+        );
+      } catch (e) { console.error('Reject notify error:', e.message); }
+    }
+
+    // Edit message to show rejected
+    try {
+      await ctx.editMessageReplyMarkup({
+        inline_keyboard: [[{ text: '❌ Оплата отклонена', callback_data: 'done' }]]
+      });
+    } catch(e) {}
+
+    await ctx.answerCbQuery('❌ Оплата отклонена, клиент уведомлён');
+    return;
+  }
+
   if (data.startsWith('review:')) {
     const parts = data.split(':');
     const orderId = parts[1];
@@ -147,12 +176,20 @@ bot.on('callback_query', async (ctx) => {
     statusLabel: STATUS_CONFIG[newStatus].label, time: tashkentTime(now)
   });
 
-  if (newStatus === 'delivered' && order.userId) {
-    const customer = db.customers[order.userId];
-    if (customer?.chatId) {
-      try {
+  // Notify customer on every status change
+  const customer = db.customers[order.userId];
+  if (customer?.chatId) {
+    try {
+      const statusMessages = {
+        confirmed:   `✅ Ваш заказ *${orderId}* подтверждён!\n\nОплата принята. Мы начинаем обработку вашего заказа. Следите за статусом в разделе «Заказы» в магазине.`,
+        shipped:     `📦 Ваш заказ *${orderId}* отправлен!\n\nПосылка уже в пути. Ожидайте доставки в течение 7–14 дней.`,
+        in_tashkent: `🏙 Ваш заказ *${orderId}* прибыл в Ташкент!\n\nМы свяжемся с вами для согласования доставки.`,
+        delivered:   null // handled separately with review
+      };
+
+      if (newStatus === 'delivered') {
         await bot.telegram.sendMessage(customer.chatId,
-          `🎉 Ваш заказ *${orderId}* доставлен! Спасибо за покупку в CSWEAR UZ!\n\nПожалуйста, оцените ваш опыт:`,
+          `🎉 Ваш заказ *${orderId}* доставлен!\n\nСпасибо за покупку в CSWEAR UZ! Надеемся, вам понравится 🔥\n\nПожалуйста, оцените ваш опыт:`,
           {
             parse_mode: 'Markdown',
             reply_markup: {
@@ -166,8 +203,10 @@ bot.on('callback_query', async (ctx) => {
             }
           }
         );
-      } catch (e) { console.error('Review msg error:', e.message); }
-    }
+      } else if (statusMessages[newStatus]) {
+        await bot.telegram.sendMessage(customer.chatId, statusMessages[newStatus], { parse_mode: 'Markdown' });
+      }
+    } catch (e) { console.error('Status notify error:', e.message); }
   }
 
   try { await ctx.editMessageReplyMarkup(buildKeyboard(order)); } catch (e) {}
@@ -250,7 +289,10 @@ app.post('/order', upload.single('screenshot'), async (req, res) => {
       `${promoLine}💰 <b>ИТОГО: ${Number(order.total).toLocaleString('ru-RU')} сум</b>\n${loc}\n\n` +
       `📦 Доставка: 7–14 дней в Ташкент`;
 
-    const kb = { inline_keyboard: [[{ text: '✅ Подтвердить оплату', callback_data: `st:confirmed:${order.id}` }]] };
+    const kb = { inline_keyboard: [
+      [{ text: '✅ Подтвердить оплату', callback_data: `st:confirmed:${order.id}` }],
+      [{ text: '❌ Отклонить оплату', callback_data: `reject:${order.id}` }]
+    ]};
 
     let sent;
     if (req.file) {
