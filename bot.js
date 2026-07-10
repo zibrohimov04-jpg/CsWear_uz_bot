@@ -22,9 +22,9 @@ const STATUS_CONFIG = {
 const STATUS_FLOW = ['pending', 'confirmed', 'shipped', 'in_tashkent', 'delivered'];
 
 const PROMO_CODES = {
-  "CSWEAR10": { discount: 10, type: "10" },
-  "FIRST15":  { discount: 15, type: "15" },
-  "VIP20":    { discount: 20, type: "20" }
+  "CSWEAR10": { discount: 10, type: "percent" },
+  "FIRST15":  { discount: 15, type: "percent" },
+  "VIP20":    { discount: 20, type: "percent" }
 };
 
 // ── DB ──
@@ -80,12 +80,10 @@ bot.start((ctx) => {
   db.customers[userId].firstName = ctx.from.first_name || null;
   save();
 
-  ctx.reply('Добро пожаловать в CSWEAR UZ! 👋\nНажмите кнопку ниже, чтобы открыть магазин.', {
-    reply_markup: {
-      keyboard: [[{ text: '🛍 Открыть магазин', web_app: { url: SHOP_URL } }]],
-      resize_keyboard: true
-    }
-  });
+  ctx.reply(
+    'Добро пожаловать в CSWEAR UZ! 👋\n\nНажмите кнопку «Открыть магазин» внизу экрана, чтобы просмотреть коллекцию.',
+    { reply_markup: { remove_keyboard: true } }
+  );
 });
 
 bot.command('broadcast', async (ctx) => {
@@ -159,11 +157,11 @@ bot.on('callback_query', async (ctx) => {
             parse_mode: 'Markdown',
             reply_markup: {
               inline_keyboard: [[
-                { text: '1⭐', callback_data: `review:${orderId}:1` },
-                { text: '2⭐', callback_data: `review:${orderId}:2` },
-                { text: '3⭐', callback_data: `review:${orderId}:3` },
-                { text: '4⭐', callback_data: `review:${orderId}:4` },
-                { text: '5⭐', callback_data: `review:${orderId}:5` }
+                { text: '⭐', callback_data: `review:${orderId}:1` },
+                { text: '⭐⭐', callback_data: `review:${orderId}:2` },
+                { text: '⭐⭐⭐', callback_data: `review:${orderId}:3` },
+                { text: '⭐⭐⭐⭐', callback_data: `review:${orderId}:4` },
+                { text: '⭐⭐⭐⭐⭐', callback_data: `review:${orderId}:5` }
               ]]
             }
           }
