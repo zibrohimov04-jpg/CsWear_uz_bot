@@ -18,7 +18,8 @@ const STATUS_CONFIG = {
   confirmed:   { label: 'Оплата подтверждена', emoji: '✅' },
   shipped:     { label: 'Отправлен',           emoji: '📦' },
   in_tashkent: { label: 'В Ташкенте',          emoji: '🏙' },
-  delivered:   { label: 'Доставлен',           emoji: '🎉' }
+  delivered:   { label: 'Доставлен',           emoji: '🎉' },
+  cancelled:   { label: 'Отменён',              emoji: '🚫' }
 };
 const STATUS_FLOW = ['pending', 'confirmed', 'shipped', 'in_tashkent', 'delivered'];
 
@@ -105,6 +106,46 @@ bot.command('broadcast', async (ctx) => {
 bot.on('callback_query', async (ctx) => {
   const data = ctx.callbackQuery.data;
   if (data === 'done') { await ctx.answerCbQuery(); return; }
+
+  // Cancellation approve/reject
+  if (data.startsWith('cancel_approve:') || data.startsWith('cancel_reject:')) {
+    const isApprove = data.startsWith('cancel_approve:');
+    const orderId = data.replace('cancel_approve:', '').replace('cancel_reject:', '');
+    const order = db.orders[orderId];
+    if (!order) { await ctx.answerCbQuery('Заказ не найден'); return; }
+
+    if (isApprove) {
+      order.status = 'cancelled';
+      if (!order.timeline) order.timeline = [];
+      order.timeline.push({ status: 'cancelled', label: 'Отменён', time: new Date().toISOString() });
+      save();
+      // Notify customer
+      const customer = db.customers[order.userId];
+      if (customer?.chatId) {
+        try {
+          await bot.telegram.sendMessage(customer.chatId,
+            `✅ Ваш запрос на отмену заказа *${orderId}* одобрен.\n\nЕсли вы уже оплатили — свяжитесь с нами для возврата средств.`,
+            { parse_mode: 'Markdown' }
+          );
+        } catch(e) {}
+      }
+      try { await ctx.editMessageReplyMarkup({ inline_keyboard: [[{ text: '✅ Отмена одобрена', callback_data: 'done' }]] }); } catch(e) {}
+      await ctx.answerCbQuery('✅ Заказ отменён');
+    } else {
+      const customer = db.customers[order.userId];
+      if (customer?.chatId) {
+        try {
+          await bot.telegram.sendMessage(customer.chatId,
+            `❌ Запрос на отмену заказа *${orderId}* отклонён.\n\nЕсли у вас есть вопросы — напишите нам напрямую.`,
+            { parse_mode: 'Markdown' }
+          );
+        } catch(e) {}
+      }
+      try { await ctx.editMessageReplyMarkup({ inline_keyboard: [[{ text: '❌ Отмена отклонена', callback_data: 'done' }]] }); } catch(e) {}
+      await ctx.answerCbQuery('❌ Отмена отклонена');
+    }
+    return;
+  }
 
   if (data.startsWith('reject:')) {
     const orderId = data.replace('reject:', '');
@@ -339,10 +380,124 @@ app.get('/orders/:userId', (req, res) => {
   res.json(userOrders);
 });
 
+// Cancellation request
+app.post('/cancel', async (req, res) => {
+  try {
+    const { orderId, userId, reason } = req.body;
+    const order = db.orders[orderId];
+    if (!order) return res.json({ ok: false, error: 'Заказ не найден' });
+    if (String(order.userId) !== String(userId)) return res.json({ ok: false, error: 'Нет доступа' });
+    if (order.status !== 'pending') return res.json({ ok: false, error: 'Заказ уже обработан и не может быть отменён' });
+
+    // Notify owner with approve/reject buttons
+    const customer = db.customers[userId];
+    const tgUsername = customer?.username ? '@' + customer.username : order.customerName || '—';
+    const items = order.items.map(i => `• ${i.name} [${i.size}] × ${i.qty}`).join('\n');
+
+    const msg =
+      `⚠️ <b>ЗАПРОС НА ОТМЕНУ ${orderId}</b>
+
+` +
+      `👤 ${order.name}
+📞 ${order.phone}
+💬 ${tgUsername}
+
+` +
+      `🧾 Товары:
+${items}
+💰 ${Number(order.total).toLocaleString('ru-RU')} сум
+
+` +
+      `❓ <b>Причина отмены:</b>
+${reason}`;
+
+    await bot.telegram.sendMessage(OWNER_CHAT_ID, msg, {
+      parse_mode: 'HTML',
+      reply_markup: { inline_keyboard: [[
+        { text: '✅ Одобрить отмену', callback_data: `cancel_approve:${orderId}` },
+        { text: '❌ Отклонить отмену', callback_data: `cancel_reject:${orderId}` }
+      ]]}
+    });
+
+    res.json({ ok: true });
+  } catch(e) {
+    console.error('Cancel error:', e);
+    res.status(500).json({ ok: false, error: e.message });
+  }
+});
+
 app.get('/', (req, res) => res.json({ status: 'CSWEAR UZ running ✅' }));
 
 app.listen(PORT, () => console.log(`Server on port ${PORT}`));
 bot.launch();
 console.log('Bot is running...');
+
+// ── DAILY SUMMARY at 08:00 Tashkent time (UTC+5 = 03:00 UTC) ──
+function scheduleDailySummary() {
+  const now = new Date();
+  const tashkent = new Date(now.toLocaleString('en-US', { timeZone: 'Asia/Tashkent' }));
+  const next = new Date(tashkent);
+  next.setHours(8, 0, 0, 0);
+  if (next <= tashkent) next.setDate(next.getDate() + 1);
+  const msUntil = next - tashkent;
+  setTimeout(async () => {
+    await sendDailySummary();
+    setInterval(sendDailySummary, 24 * 60 * 60 * 1000);
+  }, msUntil);
+  console.log(`Daily summary scheduled in ${Math.round(msUntil/60000)} minutes`);
+}
+
+async function sendDailySummary() {
+  try {
+    const now = new Date();
+    const todayStr = now.toLocaleDateString('ru-RU', { timeZone: 'Asia/Tashkent' });
+    const yesterday = new Date(now);
+    yesterday.setDate(yesterday.getDate() - 1);
+    const yStr = yesterday.toLocaleDateString('ru-RU', { timeZone: 'Asia/Tashkent', day:'2-digit', month:'long' });
+
+    const allOrders = Object.values(db.orders);
+    const todayOrders = allOrders.filter(o => {
+      const d = new Date(o.date).toLocaleDateString('ru-RU', { timeZone: 'Asia/Tashkent' });
+      return d === yesterday.toLocaleDateString('ru-RU', { timeZone: 'Asia/Tashkent' });
+    });
+
+    const total = todayOrders.filter(o => !['cancelled','rejected'].includes(o.status))
+      .reduce((s,o) => s + Number(o.total), 0);
+    const confirmed = todayOrders.filter(o => o.status === 'confirmed').length;
+    const pending = todayOrders.filter(o => o.status === 'pending').length;
+    const cancelled = todayOrders.filter(o => o.status === 'cancelled').length;
+    const rejected = todayOrders.filter(o => o.status === 'rejected').length;
+
+    const orderList = todayOrders.length > 0
+      ? todayOrders.map(o => `• ${o.id} — ${o.name} — ${Number(o.total).toLocaleString('ru-RU')} сум [${STATUS_CONFIG[o.status]?.label || o.status}]`).join('\n')
+      : 'Заказов не было';
+
+    const msg =
+      `📊 <b>Итоги за ${yStr}</b>
+
+` +
+      `📦 Всего заказов: <b>${todayOrders.length}</b>
+` +
+      `✅ Подтверждено: <b>${confirmed}</b>
+` +
+      `⏳ Ожидает: <b>${pending}</b>
+` +
+      `🚫 Отменено: <b>${cancelled}</b>
+` +
+      `❌ Отклонено: <b>${rejected}</b>
+` +
+      `💰 Выручка: <b>${total.toLocaleString('ru-RU')} сум</b>
+
+` +
+      `📋 <b>Список заказов:</b>
+${orderList}`;
+
+    await bot.telegram.sendMessage(OWNER_CHAT_ID, msg, { parse_mode: 'HTML' });
+  } catch(e) {
+    console.error('Daily summary error:', e.message);
+  }
+}
+
+scheduleDailySummary();
 process.once('SIGINT', () => bot.stop('SIGINT'));
 process.once('SIGTERM', () => bot.stop('SIGTERM'));
