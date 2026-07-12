@@ -74,12 +74,8 @@ function buildKeyboard(order) {
 const bot = new Telegraf(BOT_TOKEN);
 
 bot.start((ctx) => {
+  saveCustomer(ctx);
   const userId = String(ctx.from.id);
-  if (!db.customers[userId]) db.customers[userId] = {};
-  db.customers[userId].chatId = ctx.chat.id;
-  db.customers[userId].username = ctx.from.username || null;
-  db.customers[userId].firstName = ctx.from.first_name || null;
-  save();
 
   ctx.reply(
     'Добро пожаловать в CSWEAR UZ! 👋\n\nНажмите кнопку «Открыть магазин» внизу экрана, чтобы просмотреть коллекцию.',
@@ -309,14 +305,20 @@ bot.on('callback_query', async (ctx) => {
   await ctx.answerCbQuery(`${STATUS_CONFIG[newStatus].emoji} ${STATUS_CONFIG[newStatus].label}`);
 });
 
+function saveCustomer(ctx) {
+  try {
+    const userId = String(ctx.from.id);
+    if (!db.customers[userId]) db.customers[userId] = {};
+    db.customers[userId].chatId = ctx.chat.id;
+    if (ctx.from.username) db.customers[userId].username = ctx.from.username;
+    if (ctx.from.first_name) db.customers[userId].firstName = ctx.from.first_name;
+    save();
+  } catch(e) {}
+}
+
 bot.on('message', async (ctx) => {
   if (ctx.message.web_app_data) return;
-  const userId = String(ctx.from.id);
-  // Save customer on any message
-  if (!db.customers[userId]) db.customers[userId] = {};
-  db.customers[userId].chatId = ctx.chat.id;
-  db.customers[userId].username = ctx.from.username || null;
-  save();
+  saveCustomer(ctx);
 
   const pendingReview = Object.values(db.orders).find(
     o => o.userId === userId && o.awaitingReviewComment && o.review && !o.review.comment
@@ -352,10 +354,14 @@ app.post('/order', upload.single('screenshot'), async (req, res) => {
     order.date = new Date().toISOString();
     order.timeline = [{ status: 'pending', label: 'Заказ получен', time: order.date }];
 
-    const customer = db.customers[order.userId];
-    const tgUsername = order.tgUser ||
-      (customer?.username ? '@' + customer.username : null) ||
-      customer?.firstName || '—';
+    const customer = db.customers[order.userId] || {};
+    // Try all sources for username
+    const tgUsername =
+      (order.tgUser && order.tgUser !== '—' ? order.tgUser : null) ||
+      (customer.username ? '@' + customer.username : null) ||
+      customer.firstName ||
+      `tg:${order.userId}` ||
+      '—';
     order.customerName = tgUsername;
 
     if (customer) {
@@ -373,7 +379,7 @@ app.post('/order', upload.single('screenshot'), async (req, res) => {
       promoCode: order.promoCode || '', discount: order.discount || 0
     });
 
-    // Record promo usage
+    // Confirm promo usage
     if (order.promoCode && order.userId) {
       const usageKey = `${order.promoCode}_${order.userId}`;
       db.promoUsage[usageKey] = {
@@ -386,7 +392,8 @@ app.post('/order', upload.single('screenshot'), async (req, res) => {
         originalTotal: Math.round(order.total / (1 - order.discount/100)),
         discountAmount: Math.round(order.total / (1 - order.discount/100)) - order.total,
         finalTotal: order.total,
-        date: order.date
+        date: order.date,
+        confirmed: true
       };
       save();
 
