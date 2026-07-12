@@ -383,6 +383,7 @@ app.post('/order', upload.single('screenshot'), async (req, res) => {
     if (order.promoCode && order.userId) {
       const usageKey = `${order.promoCode}_${order.userId}`;
       db.promoUsage[usageKey] = {
+        ...( db.promoUsage[usageKey] || {} ),
         code: order.promoCode,
         userId: order.userId,
         orderId: order.id,
