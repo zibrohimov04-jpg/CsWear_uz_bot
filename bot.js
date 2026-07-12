@@ -342,9 +342,23 @@ app.use(express.json());
 
 app.post('/promo', (req, res) => {
   const code = (req.body.code || '').toUpperCase().trim();
+  const userId = String(req.body.userId || '');
   const promo = PROMO_CODES[code];
-  if (promo) res.json({ ok: true, discount: promo.discount, type: promo.type });
-  else res.json({ ok: false, error: 'Промокод недействителен' });
+
+  if (!promo) return res.json({ ok: false, error: 'Промокод недействителен' });
+
+  const usageKey = code + '_' + userId;
+  if (userId && db.promoUsage[usageKey]) {
+    return res.json({ ok: false, error: 'Вы уже использовали этот промокод' });
+  }
+
+  // Lock immediately
+  if (userId) {
+    db.promoUsage[usageKey] = { code, userId, usedAt: new Date().toISOString(), confirmed: false };
+    save();
+  }
+
+  res.json({ ok: true, discount: promo.discount, type: promo.type });
 });
 
 app.post('/order', upload.single('screenshot'), async (req, res) => {
