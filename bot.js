@@ -24,20 +24,19 @@ const STATUS_CONFIG = {
 const STATUS_FLOW = ['pending', 'confirmed', 'shipped', 'in_tashkent', 'delivered'];
 
 const PROMO_CODES = {
-  "CSWEAR10": { discount: 10, type: "percent" },
-  "FIRST15":  { discount: 15, type: "percent" },
-  "VIP20":    { discount: 20, type: "percent" }
+  "CSWEAR15": { discount: 15, type: "percent" }
 };
 
 // ── DB ──
 const DB_FILE = './db.json';
-let db = { orders: {}, customers: {} };
+let db = { orders: {}, customers: {}, promoUsage: {} };
 try {
   if (fs.existsSync(DB_FILE)) {
     const raw = fs.readFileSync(DB_FILE, 'utf8');
     db = JSON.parse(raw);
     if (!db.orders) db.orders = {};
     if (!db.customers) db.customers = {};
+    if (!db.promoUsage) db.promoUsage = {};
   }
 } catch (e) { console.log('Fresh db'); }
 
@@ -86,6 +85,40 @@ bot.start((ctx) => {
     'Добро пожаловать в CSWEAR UZ! 👋\n\nНажмите кнопку «Открыть магазин» внизу экрана, чтобы просмотреть коллекцию.',
     { reply_markup: { remove_keyboard: true } }
   );
+});
+
+bot.command('promostats', async (ctx) => {
+  if (String(ctx.from.id) !== String(OWNER_CHAT_ID)) return;
+
+  const usages = Object.values(db.promoUsage);
+  if (!usages.length) {
+    ctx.reply('📊 Промокод CSWEAR15 ещё никто не использовал.');
+    return;
+  }
+
+  const totalUses = usages.length;
+  const totalDiscount = usages.reduce((s, u) => s + (u.discountAmount || 0), 0);
+  const totalRevenue = usages.reduce((s, u) => s + (u.finalTotal || 0), 0);
+
+  const list = usages.slice(-10).reverse().map(u =>
+    `• ${u.customerName} (${u.tgUser}) — ${Number(u.finalTotal).toLocaleString('ru-RU')} сум — ${u.orderId}`
+  ).join('\n');
+
+  const msg =
+    `📊 <b>Статистика промокода CSWEAR15</b>
+
+` +
+    `👥 Использований: <b>${totalUses}</b>
+` +
+    `💸 Суммарная скидка: <b>${totalDiscount.toLocaleString('ru-RU')} сум</b>
+` +
+    `💰 Выручка с промо: <b>${totalRevenue.toLocaleString('ru-RU')} сум</b>
+
+` +
+    `📋 <b>Последние ${Math.min(10, totalUses)} использований:</b>
+${list}`;
+
+  ctx.reply(msg, { parse_mode: 'HTML' });
 });
 
 bot.command('broadcast', async (ctx) => {
@@ -336,8 +369,41 @@ app.post('/order', upload.single('screenshot'), async (req, res) => {
       type: 'new_order', id: order.id, date: tashkentTime(order.date),
       name: order.name, phone: order.phone, tgUser: tgUsername,
       items: order.items, total: order.total,
-      mapLink: order.mapLink || '', note: order.note || ''
+      mapLink: order.mapLink || '', note: order.note || '',
+      promoCode: order.promoCode || '', discount: order.discount || 0
     });
+
+    // Record promo usage
+    if (order.promoCode && order.userId) {
+      const usageKey = `${order.promoCode}_${order.userId}`;
+      db.promoUsage[usageKey] = {
+        code: order.promoCode,
+        userId: order.userId,
+        orderId: order.id,
+        customerName: order.name,
+        phone: order.phone,
+        tgUser: tgUsername,
+        originalTotal: Math.round(order.total / (1 - order.discount/100)),
+        discountAmount: Math.round(order.total / (1 - order.discount/100)) - order.total,
+        finalTotal: order.total,
+        date: order.date
+      };
+      save();
+
+      // Log to sheets promo tab
+      await postToSheet({
+        type: 'promo_use',
+        code: order.promoCode,
+        orderId: order.id,
+        date: tashkentTime(order.date),
+        customerName: order.name,
+        phone: order.phone,
+        tgUser: tgUsername,
+        originalTotal: Math.round(order.total / (1 - order.discount/100)),
+        discountAmount: Math.round(order.total / (1 - order.discount/100)) - order.total,
+        finalTotal: order.total
+      });
+    }
 
     const items = order.items.map(i =>
       `• ${i.name} [${i.size}] × ${i.qty} — ${Number(i.sum).toLocaleString('ru-RU')} сум`
