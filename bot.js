@@ -256,13 +256,13 @@ bot.on('callback_query', async (ctx) => {
           {
             parse_mode: 'Markdown',
             reply_markup: {
-              inline_keyboard: [[
-                { text: '⭐', callback_data: `review:${orderId}:1` },
-                { text: '⭐⭐', callback_data: `review:${orderId}:2` },
-                { text: '⭐⭐⭐', callback_data: `review:${orderId}:3` },
-                { text: '⭐⭐⭐⭐', callback_data: `review:${orderId}:4` },
-                { text: '⭐⭐⭐⭐⭐', callback_data: `review:${orderId}:5` }
-              ]]
+              inline_keyboard: [
+                [{ text: '⭐ 1', callback_data: `review:${orderId}:1` }],
+                [{ text: '⭐⭐ 2', callback_data: `review:${orderId}:2` }],
+                [{ text: '⭐⭐⭐ 3', callback_data: `review:${orderId}:3` }],
+                [{ text: '⭐⭐⭐⭐ 4', callback_data: `review:${orderId}:4` }],
+                [{ text: '⭐⭐⭐⭐⭐ 5', callback_data: `review:${orderId}:5` }]
+              ]
             }
           }
         );
