@@ -24,7 +24,7 @@ const STATUS_CONFIG = {
 const STATUS_FLOW = ['pending', 'confirmed', 'shipped', 'in_tashkent', 'delivered'];
 
 const PROMO_CODES = {
-  "CSWEAR15": { discount: 15, type: "percent" }
+  "FAZA15": { discount: 15, type: "percent" }
 };
 
 // ── DB ──
@@ -86,9 +86,9 @@ bot.start((ctx) => {
 bot.command('promostats', async (ctx) => {
   if (String(ctx.from.id) !== String(OWNER_CHAT_ID)) return;
 
-  const usages = Object.values(db.promoUsage);
+  const usages = Object.values(db.promoUsage).filter(u => u.confirmed);
   if (!usages.length) {
-    ctx.reply('📊 Промокод CSWEAR15 ещё никто не использовал.');
+    ctx.reply('📊 Промокоды ещё никто не использовал.');
     return;
   }
 
@@ -97,11 +97,11 @@ bot.command('promostats', async (ctx) => {
   const totalRevenue = usages.reduce((s, u) => s + (u.finalTotal || 0), 0);
 
   const list = usages.slice(-10).reverse().map(u =>
-    `• ${u.customerName} (${u.tgUser}) — ${Number(u.finalTotal).toLocaleString('ru-RU')} сум — ${u.orderId}`
+    `• [${u.code}] ${u.customerName} (${u.tgUser}) — ${Number(u.finalTotal).toLocaleString('ru-RU')} сум — ${u.orderId}`
   ).join('\n');
 
   const msg =
-    `📊 <b>Статистика промокода CSWEAR15</b>
+    `📊 <b>Статистика промокодов</b>
 
 ` +
     `👥 Использований: <b>${totalUses}</b>
@@ -147,6 +147,13 @@ bot.on('callback_query', async (ctx) => {
       order.status = 'cancelled';
       if (!order.timeline) order.timeline = [];
       order.timeline.push({ status: 'cancelled', label: 'Отменён', time: new Date().toISOString() });
+
+      // Release the promo code back to the customer since the order was cancelled
+      if (order.promoCode && order.userId) {
+        const usageKey = `${order.promoCode}_${order.userId}`;
+        delete db.promoUsage[usageKey];
+      }
+
       save();
       // Notify customer
       const customer = db.customers[order.userId];
@@ -186,6 +193,13 @@ bot.on('callback_query', async (ctx) => {
     order.status = 'rejected';
     if (!order.timeline) order.timeline = [];
     order.timeline.push({ status: 'rejected', label: 'Оплата отклонена', time: new Date().toISOString() });
+
+    // Release the promo code back to the customer since the payment was rejected
+    if (order.promoCode && order.userId) {
+      const usageKey = `${order.promoCode}_${order.userId}`;
+      delete db.promoUsage[usageKey];
+    }
+
     save();
 
     // Update sheets
@@ -319,6 +333,7 @@ function saveCustomer(ctx) {
 bot.on('message', async (ctx) => {
   if (ctx.message.web_app_data) return;
   saveCustomer(ctx);
+  const userId = String(ctx.from.id);
 
   const pendingReview = Object.values(db.orders).find(
     o => o.userId === userId && o.awaitingReviewComment && o.review && !o.review.comment
@@ -347,15 +362,12 @@ app.post('/promo', (req, res) => {
 
   if (!promo) return res.json({ ok: false, error: 'Промокод недействителен' });
 
+  // Only block if this user already has a CONFIRMED (order actually placed) usage.
+  // Checking/previewing the discount here must NOT lock or consume the code —
+  // that only happens once an order is actually submitted, in /order below.
   const usageKey = code + '_' + userId;
-  if (userId && db.promoUsage[usageKey]) {
+  if (userId && db.promoUsage[usageKey] && db.promoUsage[usageKey].confirmed) {
     return res.json({ ok: false, error: 'Вы уже использовали этот промокод' });
-  }
-
-  // Lock immediately
-  if (userId) {
-    db.promoUsage[usageKey] = { code, userId, usedAt: new Date().toISOString(), confirmed: false };
-    save();
   }
 
   res.json({ ok: true, discount: promo.discount, type: promo.type });
@@ -393,11 +405,11 @@ app.post('/order', upload.single('screenshot'), async (req, res) => {
       promoCode: order.promoCode || '', discount: order.discount || 0
     });
 
-    // Confirm promo usage
+    // Lock + confirm promo usage — this is the ONLY place a promo code gets
+    // marked as used, since this route only fires once an order is actually placed.
     if (order.promoCode && order.userId) {
       const usageKey = `${order.promoCode}_${order.userId}`;
       db.promoUsage[usageKey] = {
-        ...( db.promoUsage[usageKey] || {} ),
         code: order.promoCode,
         userId: order.userId,
         orderId: order.id,
